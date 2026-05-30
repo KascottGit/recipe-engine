@@ -1,0 +1,13 @@
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: recipe_postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_DB: recipedb
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./database_data:/var/lib/postgresql/data
+    restart: unless-stopped
