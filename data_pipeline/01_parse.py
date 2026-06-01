@@ -5,59 +5,84 @@ import ast
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import spacy
-
+from spacy.matcher import PhraseMatcher
+from ingredient_parser import parse_ingredient
+from ingredient_parser import parse_multiple_ingredients
 
 COOKING_LEMMAS = {
-    "cook": "cooked",
-    "fry": "fried",
-    "bake": "baked",
-    "roast": "roasted",
+    # Wet Heat (Water/Steam based - No Maillard reaction)
     "boil": "boiled",
-    "simmer": "simmered",
-    "grill": "grilled",
-    "brown": "browned",
-    "sear": "seared",
-    "toast": "toasted",
-    "caramelize": "caramelized",
+    "simmer": "boiled",
+    "poach": "boiled",
+    "blanch": "boiled",
+    "steam": "boiled",
+    # Dry Heat (Oven/Air based - Maillard reaction)
+    "bake": "baked",
+    "roast": "baked",
+    "toast": "baked",
+    "grill": "baked",
+    # Direct Heat + Fat (Maillard reaction + Lipid absorption)
+    "fry": "fried",
+    "saute": "fried",
+    "sauté": "fried",
+    "sear": "fried",
+    "brown": "fried",
+    "caramelize": "fried",
+    # Generic / State Changes
+    "cook": "cooked",
     "melt": "melted",
-    "saute": "sautéed",
-    "sauté": "sautéed",
     "smoke": "smoked",
-    "blanch": "blanched",
-    "poach": "poached",
-    "steam": "steamed",
 }
 
 # Global variable for the worker processes
 nlp = None
+matcher = None
+canonical_map = {}
 
 
 def init_worker():
-    """
-    Initializes the NLP model once per CPU core worker.
-    We aggressively strip out 'tagger' and 'attribute_ruler' to speed up the pipeline.
-    """
-    global nlp
+    global nlp, matcher, canonical_map
+
+    # 1. Load the base NLP, stripping the useless default NER
     nlp = spacy.load("en_core_web_sm", disable=["ner"])
+    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")  # Match on lowercase
+
+    # 2. Load your custom ontology
+    with open("ingredient_ontology.json", "r") as f:
+        ontology = json.load(f)
+
+    # 3. Populate the Matcher and the Reverse Lookup Map
+    for canonical_id, variants in ontology.items():
+        patterns = [nlp.make_doc(variant) for variant in variants]
+        matcher.add(canonical_id, patterns)
+
+        for variant in variants:
+            canonical_map[variant.lower()] = canonical_id
 
 
 def process_single_row(row):
-    global nlp
+    global nlp, matcher, canonical_map
 
     try:
-        base_ingredients = ast.literal_eval(row["NER"])
+        ingredients_data = ast.literal_eval(row["NER"])
         directions_data = ast.literal_eval(row["directions"])
     except (ValueError, SyntaxError, KeyError) as e:
         print(e)
         return None  # Skip corrupted rows
 
-    # 1. Format the pre-cleaned ingredients for our vectors
-    # Replaces spaces with underscores: "chicken breast" -> "chicken_breast"
-    clean_bases = []
-    for base in base_ingredients:
-        if isinstance(base, str) and base.strip():
-            clean_bases.append(base.lower().strip().replace(" ", "_"))
+    raw_ingredients_text = " . ".join(ingredients_data)
+    doc = nlp(raw_ingredients_text)
 
+    matches = matcher(doc)
+
+    clean_bases = set()
+    for match_id, start, end in matches:
+        matched_span = doc[start:end].text.lower()
+
+        canonical_name = canonical_map.get(matched_span)
+        if canonical_name:
+            clean_bases.add(canonical_name)
+            
     # 2. Extract Cooking States
     full_instructions = " ".join(directions_data)
     doc = nlp(full_instructions)
@@ -84,6 +109,10 @@ def process_single_row(row):
 
         final_state = ingredient_state if ingredient_state else terminal_state
         recipe_tokens.append(f"{base}_{final_state}")
+        
+    recipe_tokens = []
+    for base in clean_bases:
+        recipe_tokens.append(base)
 
     return {
         "id": row.get("Row", row.get("", "unknown")),
@@ -112,41 +141,34 @@ def process_csv_corpus(input_filepath, output_filepath, max_rows=None):
         exist_ok=True,
     )
 
-    # Leave 1 or 2 cores free so your OS doesn't freeze
     optimal_workers = max(1, multiprocessing.cpu_count() - 2)
     print(f"Spinning up {optimal_workers} CPU workers...")
 
     total_processed = 0
 
     with open(output_filepath, "w", encoding="utf-8") as outfile:
-        # Initialize the process pool
         with ProcessPoolExecutor(
             max_workers=optimal_workers, initializer=init_worker
         ) as executor:
             for batch_num, batch in enumerate(stream_csv_batches(input_filepath)):
-                # Enforce the max_rows limit
                 if max_rows is not None:
                     remaining_rows = max_rows - total_processed
                     if remaining_rows <= 0:
-                        break  # Safety catch
+                        break  
 
-                    # If this batch pushes us over the limit, slice it down to the exact remainder
                     if len(batch) > remaining_rows:
                         batch = batch[:remaining_rows]
 
                 print(f"Processing Batch {batch_num + 1} ({len(batch)} rows)...")
 
-                # Execute the batch in parallel
                 results = executor.map(process_single_row, batch)
 
-                # Write results sequentially as they finish
                 for result in results:
-                    if result and result["tokens"]:  # Ignore skipped/empty rows
+                    if result and result["tokens"]: 
                         outfile.write(json.dumps(result) + "\n")
 
                 total_processed += len(batch)
 
-                # Halt the generator if the limit is hit
                 if max_rows is not None and total_processed >= max_rows:
                     print(f"\nReached max_rows limit ({max_rows}). Halting extraction.")
                     break
@@ -158,5 +180,5 @@ if __name__ == "__main__":
     output_path = "parsed_recipes.jsonl"
 
     print(f"Starting CSV pipeline execution on {input_path}...")
-    process_csv_corpus(input_path, output_path, max_rows=10000)
+    process_csv_corpus(input_path, output_path, max_rows=500000)
     print(f"Execution finished. Output saved to {output_path}")
