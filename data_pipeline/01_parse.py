@@ -6,8 +6,9 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import spacy
 from spacy.matcher import PhraseMatcher
-from ingredient_parser import parse_ingredient
-from ingredient_parser import parse_multiple_ingredients
+
+from ingredient_parser import parse_single_ingredient
+
 
 COOKING_LEMMAS = {
     # Wet Heat (Water/Steam based - No Maillard reaction)
@@ -34,6 +35,8 @@ COOKING_LEMMAS = {
     "smoke": "smoked",
 }
 
+BASE_INGREDIENTS = []
+
 # Global variable for the worker processes
 nlp = None
 matcher = None
@@ -47,18 +50,6 @@ def init_worker():
     nlp = spacy.load("en_core_web_sm", disable=["ner"])
     matcher = PhraseMatcher(nlp.vocab, attr="LOWER")  # Match on lowercase
 
-    # 2. Load your custom ontology
-    with open("ingredient_ontology.json", "r") as f:
-        ontology = json.load(f)
-
-    # 3. Populate the Matcher and the Reverse Lookup Map
-    for canonical_id, variants in ontology.items():
-        patterns = [nlp.make_doc(variant) for variant in variants]
-        matcher.add(canonical_id, patterns)
-
-        for variant in variants:
-            canonical_map[variant.lower()] = canonical_id
-
 
 def process_single_row(row):
     global nlp, matcher, canonical_map
@@ -70,19 +61,10 @@ def process_single_row(row):
         print(e)
         return None  # Skip corrupted rows
 
-    raw_ingredients_text = " . ".join(ingredients_data)
-    doc = nlp(raw_ingredients_text)
+    parsed_ingredients = []
+    for ingredient in ingredients_data:
+        parsed_ingredients.append(parse_single_ingredient(ingredient))
 
-    matches = matcher(doc)
-
-    clean_bases = set()
-    for match_id, start, end in matches:
-        matched_span = doc[start:end].text.lower()
-
-        canonical_name = canonical_map.get(matched_span)
-        if canonical_name:
-            clean_bases.add(canonical_name)
-            
     # 2. Extract Cooking States
     full_instructions = " ".join(directions_data)
     doc = nlp(full_instructions)
@@ -95,7 +77,7 @@ def process_single_row(row):
 
     # 3. Synthesize Compound Tokens
     recipe_tokens = []
-    for base in clean_bases:
+    for base in parsed_ingredients:
         ingredient_state = None
         base_words = base.split("_")
 
@@ -109,10 +91,11 @@ def process_single_row(row):
 
         final_state = ingredient_state if ingredient_state else terminal_state
         recipe_tokens.append(f"{base}_{final_state}")
-        
+    """
     recipe_tokens = []
-    for base in clean_bases:
+    for base in parsed_ingredients:
         recipe_tokens.append(base)
+    """
 
     return {
         "id": row.get("Row", row.get("", "unknown")),
@@ -141,7 +124,7 @@ def process_csv_corpus(input_filepath, output_filepath, max_rows=None):
         exist_ok=True,
     )
 
-    optimal_workers = max(1, multiprocessing.cpu_count() - 2)
+    optimal_workers = max(1, multiprocessing.cpu_count())
     print(f"Spinning up {optimal_workers} CPU workers...")
 
     total_processed = 0
@@ -154,7 +137,7 @@ def process_csv_corpus(input_filepath, output_filepath, max_rows=None):
                 if max_rows is not None:
                     remaining_rows = max_rows - total_processed
                     if remaining_rows <= 0:
-                        break  
+                        break
 
                     if len(batch) > remaining_rows:
                         batch = batch[:remaining_rows]
@@ -164,7 +147,7 @@ def process_csv_corpus(input_filepath, output_filepath, max_rows=None):
                 results = executor.map(process_single_row, batch)
 
                 for result in results:
-                    if result and result["tokens"]: 
+                    if result and result["tokens"]:
                         outfile.write(json.dumps(result) + "\n")
 
                 total_processed += len(batch)
@@ -180,5 +163,5 @@ if __name__ == "__main__":
     output_path = "parsed_recipes.jsonl"
 
     print(f"Starting CSV pipeline execution on {input_path}...")
-    process_csv_corpus(input_path, output_path, max_rows=500000)
+    process_csv_corpus(input_path, output_path, max_rows=100000)
     print(f"Execution finished. Output saved to {output_path}")
