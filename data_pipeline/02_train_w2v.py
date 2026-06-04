@@ -1,3 +1,4 @@
+import os
 import json
 import multiprocessing
 import psycopg2
@@ -5,7 +6,10 @@ from psycopg2.extras import execute_values
 from gensim.models import Word2Vec
 
 # Database connection string (from your earlier local Docker setup)
-DB_DSN = "host=localhost dbname=recipedb user=admin password=supersecretpassword"
+DB_DSN = os.environ.get(
+    "DATABASE_URL", 
+    "host=localhost dbname=recipedb user=admin password=supersecretpassword"
+)
 
 
 class StreamRecipeCorpus:

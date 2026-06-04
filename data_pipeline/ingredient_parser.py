@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 import simplemma
 from ingredient_slicer import IngredientSlicer
 
@@ -148,7 +149,8 @@ STOPWORDS = {
     "keebler",
     "peeled",
     "unpeeled",
-    "fryer"
+    "fryer",
+    "remove"
 }
 
 BASE_INGREDIENTS_PRIORITY = [
@@ -218,6 +220,7 @@ PHRASE_PATTERN = re.compile(
 )
 
 
+@lru_cache(maxsize=131072)
 def parse_single_ingredient(item: str) -> str:
 
     if not isinstance(item, str) or not item.strip():

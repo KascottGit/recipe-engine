@@ -1,6 +1,7 @@
 import pandas as pd
 import ast
 import json
+import multiprocessing
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
@@ -60,7 +61,7 @@ def extract_unique_ingredients_multicore(filepath, output_filepath, max_rows=Non
     ]
 
     translation_map = {}
-    num_workers = 16
+    num_workers = max(1, multiprocessing.cpu_count())
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(slice_batch_worker, chunk) for chunk in chunks]
